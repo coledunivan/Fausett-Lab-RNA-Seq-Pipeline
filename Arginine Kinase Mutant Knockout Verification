@@ -1,0 +1,206 @@
+# Load required libraries
+library(tidyverse)
+library(DESeq2)
+
+# Step 1: Load raw counts
+raw_counts <- read.csv("RNASEQ61125.csv", check.names = FALSE)
+
+# Step 2: Rename first column to "Gene" and remove duplicates
+colnames(raw_counts)[1] <- "Gene"
+counts <- raw_counts %>%
+  filter(!duplicated(Gene)) %>%
+  column_to_rownames("Gene")
+
+# Step 3: Load sample metadata
+coldata <- read.csv("Sample_Metadata_Table.csv", row.names = 1)
+
+# Step 4: Align count matrix and coldata
+shared_samples <- intersect(colnames(counts), rownames(coldata))
+counts <- counts[, shared_samples]
+coldata <- coldata[shared_samples, ]
+
+# Confirm alignment
+stopifnot(all(colnames(counts) == rownames(coldata)))
+
+# Step 5: Create DESeq2 object
+#Simpligied model since differential expression isn't important here this is just to verify knockouts
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = coldata,
+                              design = ~ genotype + treatment)
+
+# Step 6: Run DESeq (optional here since you're not yet comparing groups)
+dds <- DESeq(dds)
+
+# ─────────────────────────────────────────────────────────────
+# Step 7: Verify knockout expression vs. N2 for 3 key strains
+# ─────────────────────────────────────────────────────────────
+
+# Load dplyr for tidy operations
+library(dplyr)
+
+# Define target knockout genes
+gene_codes <- c("F44G3.2", "W10C8.5", "F46H5.3")  # MAH172, RB2060, RB2598
+gene_codes <- paste0("CELE_", gene_codes)
+names(gene_codes) <- c("MAH172", "RB2060", "RB2598")
+
+# Define genotype sample groups
+n2_samples     <- rownames(coldata)[coldata$genotype == "N2"]
+mah172_samples <- rownames(coldata)[coldata$genotype == "MAH172"]
+rb2060_samples <- rownames(coldata)[coldata$genotype == "RB2060"]
+rb2598_samples <- rownames(coldata)[coldata$genotype == "RB2598"]
+
+# Compute mean expression for each gene across groups
+expression_matrix <- lapply(gene_codes, function(gene) {
+  if (!gene %in% rownames(counts)) {
+    return(c(N2 = NA, MAH172 = NA, RB2060 = NA, RB2598 = NA))
+  }
+  c(
+    N2      = mean(as.numeric(counts[gene, n2_samples]), na.rm = TRUE),
+    MAH172  = mean(as.numeric(counts[gene, mah172_samples]), na.rm = TRUE),
+    RB2060  = mean(as.numeric(counts[gene, rb2060_samples]), na.rm = TRUE),
+    RB2598  = mean(as.numeric(counts[gene, rb2598_samples]), na.rm = TRUE)
+  )
+})
+    
+  
+
+# Format results
+expression_df <- as.data.frame(do.call(rbind, expression_matrix))
+expression_df$Gene <- gene_codes
+expression_df <- expression_df[, c("Gene", "N2", "MAH172", "RB2060", "RB2598")]
+
+# Compute fold changes vs N2
+expression_df <- expression_df %>%
+  mutate(
+    FC_MAH172 = MAH172 / N2,
+    FC_RB2060 = RB2060 / N2,
+    FC_RB2598 = RB2598 / N2
+  )
+
+# Display result - plotting mean expression
+print(expression_df)
+
+# Load libraries
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# Mapping from CELE_ IDs to argk names
+gene_labels <- c(
+  "CELE_F44G3.2" = "argk-1",
+  "CELE_W10C8.5" = "argk-2",
+  "CELE_F46H5.3" = "argk-4"
+)
+
+# Convert to long format and apply the friendly names
+expression_long <- expression_df %>%
+  select(Gene, N2, MAH172, RB2060, RB2598) %>%
+  pivot_longer(cols = -Gene, names_to = "Genotype", values_to = "Expression") %>%
+  mutate(Gene = gene_labels[Gene])  # Apply mapping
+
+# Plot
+ggplot(expression_long, aes(x = Genotype, y = Expression, fill = Genotype)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  facet_wrap(~ Gene, scales = "free_y") +
+  labs(title = "Expression of Knocked-Out Genes in Argk Mutants",
+       x = "Genotype",
+       y = "Mean Expression (Counts)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+#Display results - plotting log fold change
+# Ensure dplyr and ggplot2 are loaded
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# Mapping gene codes to argk names
+gene_labels <- c(
+  "CELE_F44G3.2" = "argk-1",
+  "CELE_W10C8.5" = "argk-2",
+  "CELE_F46H5.3" = "argk-4"
+)
+
+# Create log2 fold-change values and tidy the data
+fc_long <- expression_df %>%
+  mutate(across(starts_with("FC_"), log2)) %>%
+  select(Gene, starts_with("FC_")) %>%
+  pivot_longer(cols = starts_with("FC_"),
+               names_to = "Comparison",
+               values_to = "log2FC") %>%
+  mutate(
+    Gene = gene_labels[Gene],
+    Comparison = gsub("FC_", "", Comparison)
+  )
+
+# Plot log2 fold change
+ggplot(fc_long, aes(x = Comparison, y = log2FC, fill = Comparison)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  facet_wrap(~ Gene, scales = "free_y") +
+  labs(
+    title = expression(paste("Log"["2"], " Fold Change in Argk Mutant Expression Relative to N2")),
+    x = "Knockout Strain",
+    y = expression(log[2]*"(Fold Change)")
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Add significance labels based on arbitrary thresholds (for demonstration)
+fc_long <- fc_long %>%
+  mutate(
+    Significance = case_when(
+      abs(log2FC) >= 2 ~ "***",
+      abs(log2FC) >= 1.5 ~ "**",
+      abs(log2FC) >= 1 ~ "*",
+      TRUE ~ ""
+    )
+  )
+
+# Plot with significance stars
+ggplot(fc_long, aes(x = Comparison, y = log2FC, fill = Comparison)) +
+  geom_bar(stat = "identity", position = position_dodge(), width = 0.7) +
+  geom_text(aes(label = Significance),
+            vjust = -0.5, size = 5, fontface = "bold") +
+  facet_wrap(~ Gene, scales = "free_y") +
+  labs(
+    title = expression(paste("Log"["2"], " Fold Change in Argk Mutant Expression Relative to N2")),
+    x = "Knockout Strain",
+    y = expression(log[2]*"(Fold Change)")
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Save mean expression plot
+pdf("Mean_Expression_Argk_Knockouts.pdf", width = 8, height = 6)
+
+ggplot(expression_long, aes(x = Genotype, y = Expression, fill = Genotype)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  facet_wrap(~ Gene, scales = "free_y") +
+  labs(
+    title = "Expression of Knocked-Out Genes in Argk Mutants",
+    x = "Genotype",
+    y = "Mean Expression (Counts)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+dev.off()
+
+# Save log2 fold change plot
+pdf("Log2FC_Argk_Knockouts_vs_N2.pdf", width = 8, height = 6)
+
+ggplot(fc_long, aes(x = Comparison, y = log2FC, fill = Comparison)) +
+  geom_bar(stat = "identity", position = position_dodge(), width = 0.7) +
+  geom_text(aes(label = Significance),
+            vjust = -0.5, size = 5, fontface = "bold") +
+  facet_wrap(~ Gene, scales = "free_y") +
+  labs(
+    title = expression(paste("Log"["2"], " Fold Change in Argk Mutant Expression Relative to N2")),
+    x = "Knockout Strain",
+    y = expression(log[2]*"(Fold Change)")
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+dev.off()
