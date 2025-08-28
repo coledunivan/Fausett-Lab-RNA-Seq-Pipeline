@@ -1,0 +1,215 @@
+# Load libraries
+library(DESeq2)
+library(tidyverse)
+library(pheatmap)
+library(gridExtra)
+library(grid)
+
+# Load filtered DAF-16 count matrix
+raw_counts <- read.csv("Matched_DAF16_Genes_Counts.csv", check.names = FALSE)
+colnames(raw_counts)[1] <- "Gene"
+counts <- raw_counts %>%
+  filter(!duplicated(Gene)) %>%
+  column_to_rownames("Gene")
+
+# Load metadata
+coldata <- read.csv("Sample_Metadata_Table.csv", row.names = 1)
+
+# Align sample names
+shared_samples <- intersect(colnames(counts), rownames(coldata))
+counts <- counts[, shared_samples]
+coldata <- coldata[shared_samples, ]
+stopifnot(all(colnames(counts) == rownames(coldata)))
+
+# Construct DESeq2 object
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = coldata,
+                              design = ~ genotype + treatment + genotype:treatment)
+dds$genotype <- relevel(dds$genotype, ref = "N2")
+dds$treatment <- relevel(dds$treatment, ref = "treated")
+dds <- DESeq(dds)
+
+# Extract interaction results
+res_int_rb2060 <- results(dds, name = "genotypeRB2060.treatmentuntreated")
+res_int_rb2598 <- results(dds, name = "genotypeRB2598.treatmentuntreated")
+
+# Define heatmap function
+plot_gene_set_heatmap <- function(dds_object, genotypes_to_include, title, output_file = NULL) {
+  gene_set <- rownames(dds_object)
+  if (length(gene_set) < 2) {
+    stop("Not enough genes to plot.")
+  }
+  
+  rld <- rlog(dds_object, blind = TRUE)
+  expr <- assay(rld)[gene_set, , drop = FALSE]
+  
+  coldata_df <- as.data.frame(colData(dds_object))
+  coldata_df$sample <- rownames(coldata_df)
+  sample_info <- coldata_df %>%
+    filter(genotype %in% genotypes_to_include)
+  
+  expr <- expr[, sample_info$sample, drop = FALSE]
+  sample_info <- sample_info[match(colnames(expr), sample_info$sample), ]
+  
+  expr_avg <- sapply(genotypes_to_include, function(g) {
+    rowMeans(expr[, sample_info$genotype == g, drop = FALSE])
+  })
+  
+  expr_centered <- t(scale(t(expr_avg), center = TRUE, scale = FALSE))
+  
+  heatmap_grob <- pheatmap(expr_centered,
+                           main = title,
+                           cluster_rows = TRUE,
+                           cluster_cols = TRUE,
+                           show_rownames = FALSE,
+                           show_colnames = TRUE,
+                           fontsize_col = 10,
+                           angle_col = 45,
+                           color = colorRampPalette(c("blue", "white", "red"))(100),
+                           breaks = seq(-1, 1, length.out = 100),
+                           silent = TRUE)$gtable
+  
+  caption_grob <- textGrob("Rlog-transformed expression, mean-centered per gene",
+                           gp = gpar(fontsize = 10),
+                           x = unit(0.5, "npc"),
+                           just = "center")
+  
+  if (!is.null(output_file)) {
+    pdf(output_file, width = 6, height = 8)
+    grid.arrange(heatmap_grob, caption_grob, heights = c(0.92, 0.08))
+    dev.off()
+  } else {
+    grid.arrange(heatmap_grob, caption_grob, heights = c(0.92, 0.08))
+  }
+}
+
+# Generate heatmaps
+plot_gene_set_heatmap(
+  dds_object = dds,
+  genotypes_to_include = c("N2", "RB2060"),
+  title = "DAF-16 Targets: RB2060 vs N2 (Interaction Effect)",
+  output_file = "Heatmap_DAF16_RB2060_Interaction.pdf"
+)
+
+plot_gene_set_heatmap(
+  dds_object = dds,
+  genotypes_to_include = c("N2", "RB2598"),
+  title = "DAF-16 Targets: RB2598 vs N2 (Interaction Effect)",
+  output_file = "Heatmap_DAF16_RB2598_Interaction.pdf"
+)
+
+
+#Treated and Non treated
+# Load libraries
+library(DESeq2)
+library(tidyverse)
+library(pheatmap)
+library(gridExtra)
+library(grid)
+
+# Load filtered DAF-16 count matrix
+raw_counts <- read.csv("Matched_DAF16_Genes_Counts.csv", check.names = FALSE)
+colnames(raw_counts)[1] <- "Gene"
+counts <- raw_counts %>%
+  filter(!duplicated(Gene)) %>%
+  column_to_rownames("Gene")
+
+# Load metadata
+coldata <- read.csv("Sample_Metadata_Table.csv", row.names = 1)
+
+# Align sample names
+shared_samples <- intersect(colnames(counts), rownames(coldata))
+counts <- counts[, shared_samples]
+coldata <- coldata[shared_samples, ]
+stopifnot(all(colnames(counts) == rownames(coldata)))
+
+# Construct DESeq2 object
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = coldata,
+                              design = ~ genotype + treatment + genotype:treatment)
+dds$genotype <- relevel(dds$genotype, ref = "N2")
+dds$treatment <- relevel(dds$treatment, ref = "treated")
+dds <- DESeq(dds)
+
+# Define new heatmap function that includes treatment condition
+plot_gene_set_by_condition <- function(dds_object, genotypes_to_include, treatment_label, title, output_file = NULL) {
+  gene_set <- rownames(dds_object)
+  if (length(gene_set) < 2) {
+    stop("Not enough genes to plot.")
+  }
+  
+  rld <- rlog(dds_object, blind = TRUE)
+  expr <- assay(rld)[gene_set, , drop = FALSE]
+  
+  coldata_df <- as.data.frame(colData(dds_object))
+  coldata_df$sample <- rownames(coldata_df)
+  sample_info <- coldata_df %>%
+    filter(genotype %in% genotypes_to_include & treatment == treatment_label)
+  
+  expr <- expr[, sample_info$sample, drop = FALSE]
+  sample_info <- sample_info[match(colnames(expr), sample_info$sample), ]
+  
+  expr_avg <- sapply(genotypes_to_include, function(g) {
+    rowMeans(expr[, sample_info$genotype == g, drop = FALSE])
+  })
+  
+  expr_centered <- t(scale(t(expr_avg), center = TRUE, scale = FALSE))
+  
+  heatmap_grob <- pheatmap(expr_centered,
+                           main = title,
+                           cluster_rows = TRUE,
+                           cluster_cols = TRUE,
+                           show_rownames = FALSE,
+                           show_colnames = TRUE,
+                           fontsize_col = 10,
+                           angle_col = 45,
+                           color = colorRampPalette(c("blue", "white", "red"))(100),
+                           breaks = seq(-1, 1, length.out = 100),
+                           silent = TRUE)$gtable
+  
+  caption_grob <- textGrob("Rlog-transformed expression, mean-centered per gene",
+                           gp = gpar(fontsize = 10),
+                           x = unit(0.5, "npc"),
+                           just = "center")
+  
+  if (!is.null(output_file)) {
+    pdf(output_file, width = 6, height = 8)
+    grid.arrange(heatmap_grob, caption_grob, heights = c(0.92, 0.08))
+    dev.off()
+  } else {
+    grid.arrange(heatmap_grob, caption_grob, heights = c(0.92, 0.08))
+  }
+}
+
+# Generate heatmaps by genotype and treatment
+plot_gene_set_by_condition(
+  dds_object = dds,
+  genotypes_to_include = c("N2", "RB2060"),
+  treatment_label = "untreated",
+  title = "DAF-16 Targets: RB2060 vs N2 (Untreated)",
+  output_file = "Heatmap_DAF16_RB2060_Untreated.pdf"
+)
+
+plot_gene_set_by_condition(
+  dds_object = dds,
+  genotypes_to_include = c("N2", "RB2060"),
+  treatment_label = "treated",
+  title = "DAF-16 Targets: RB2060 vs N2 (Treated)",
+  output_file = "Heatmap_DAF16_RB2060_Treated.pdf"
+)
+
+plot_gene_set_by_condition(
+  dds_object = dds,
+  genotypes_to_include = c("N2", "RB2598"),
+  treatment_label = "untreated",
+  title = "DAF-16 Targets: RB2598 vs N2 (Untreated)",
+  output_file = "Heatmap_DAF16_RB2598_Untreated.pdf"
+)
+
+plot_gene_set_by_condition(
+  dds_object = dds,
+  genotypes_to_include = c("N2", "RB2598"),
+  treatment_label = "treated",
+  title = "DAF-16 Targets: RB2598 vs N2 (Treated)",
+  output_file = "Heatmap_DAF16_RB2598_Treated.pdf"
+)
