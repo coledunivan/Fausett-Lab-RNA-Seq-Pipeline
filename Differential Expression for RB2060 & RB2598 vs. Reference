@@ -1,0 +1,125 @@
+
+# DESeq2: All Differentially Expressed Genes (padj & logfoldchange filtering)
+
+
+library(DESeq2)
+library(dplyr)
+library(tibble)
+
+# ---- File paths ----
+counts_file   <- "RNASEQ61125 copy 2.csv"
+metadata_file <- "Sample_Metadata_Table copy.csv"
+
+# ---- Load count data ----
+counts_raw <- read.csv(counts_file, check.names = FALSE, stringsAsFactors = FALSE)
+
+# ---- Drop empty or unnamed first column if present ----
+if (colnames(counts_raw)[1] == "" || grepl("^Unnamed", colnames(counts_raw)[1])) {
+  counts_raw <- counts_raw[, -1]
+}
+
+# ---- Standardize gene column ----
+possible_gene_cols <- c("gene_symbol", "Gene", "gene")
+present <- possible_gene_cols[possible_gene_cols %in% colnames(counts_raw)]
+if (length(present) == 0) {
+  stop("Counts file must contain 'Gene', 'gene', or 'gene_symbol' column.")
+}
+# Rename first match to gene_symbol
+if (present[1] != "gene_symbol") {
+  names(counts_raw)[names(counts_raw) == present[1]] <- "gene_symbol"
+}
+
+# ---- Identify sample columns ----
+sample_cols <- grep("^A\\d+", colnames(counts_raw), value = TRUE)
+stopifnot(length(sample_cols) > 0)
+
+# ---- Create count matrix (one row per gene) ----
+counts_unique <- counts_raw %>%
+  dplyr::group_by(gene_symbol) %>%
+  dplyr::slice(1) %>%
+  dplyr::ungroup()
+
+count_matrix <- counts_unique %>%
+  dplyr::select(gene_symbol, dplyr::all_of(sample_cols)) %>%
+  tibble::column_to_rownames("gene_symbol")
+
+# ---- Load metadata ----
+coldata <- read.csv(metadata_file, row.names = 1, check.names = FALSE, stringsAsFactors = FALSE)
+shared <- intersect(colnames(count_matrix), rownames(coldata))
+if (length(shared) == 0) stop("No overlapping samples between counts and metadata.")
+count_matrix <- count_matrix[, shared]
+coldata      <- coldata[shared, ]
+
+coldata$genotype  <- factor(coldata$genotype)
+coldata$treatment <- factor(coldata$treatment)
+if (!"experiment" %in% colnames(coldata)) {
+  coldata$experiment <- factor("exp1")
+} else {
+  coldata$experiment <- factor(coldata$experiment)
+}
+
+# ---- Construct DESeq2 object ----
+dds <- DESeqDataSetFromMatrix(
+  countData = round(count_matrix),
+  colData   = coldata,
+  design    = ~ genotype * treatment + genotype:experiment + treatment:experiment
+)
+dds <- DESeq(dds)
+
+# ---- Simpler model for pairwise contrasts ----
+dds_simple <- dds
+dds_simple$genotype  <- relevel(dds_simple$genotype,  ref = "N2")
+dds_simple$treatment <- relevel(dds_simple$treatment, ref = "untreated")
+design(dds_simple) <- ~ genotype + treatment + genotype:treatment
+dds_simple <- DESeq(dds_simple)
+
+# ---- Contrast helper ----
+get_contrast <- function(dds_obj, genotype_alt, treatment_level) {
+  rn <- resultsNames(dds_obj)
+  # main genotype effect
+  main_coef <- rn[grepl(genotype_alt, rn) & grepl("^genotype", rn) &
+                    !grepl("\\.", rn) & !grepl("treatment", rn)]
+  if (length(main_coef) != 1) stop("Unable to identify main coefficient for ", genotype_alt)
+  # interaction term
+  pat1 <- paste0("genotype", genotype_alt, ".treatmenttreated")
+  pat2 <- paste0("genotype", genotype_alt, "_treatmenttreated")
+  inter <- rn[rn %in% c(pat1, pat2)]
+  if (treatment_level == "untreated") {
+    results(dds_obj, name = main_coef)
+  } else if (treatment_level == "treated") {
+    if (length(inter) != 1) stop("Unable to find interaction coefficient for ", genotype_alt)
+    results(dds_obj, list(c(main_coef, inter)))
+  } else stop("Unknown treatment level: ", treatment_level)
+}
+
+# ---- Define contrasts ----
+contrast_list <- list(
+  "RB2060_vs_N2_untreated" = list(alt="RB2060", trt="untreated"),
+  "RB2060_vs_N2_treated"   = list(alt="RB2060", trt="treated"),
+  "RB2598_vs_N2_untreated" = list(alt="RB2598", trt="untreated"),
+  "RB2598_vs_N2_treated"   = list(alt="RB2598", trt="treated")
+)
+
+# ---- Filtering parameters ----
+padj_cutoff <- 0.05
+lfc_cutoff  <- 1  # log2 fold-change threshold
+
+# ---- Run contrasts and save DEG tables ----
+if (!dir.exists("DEGs")) dir.create("DEGs")
+
+for (nm in names(contrast_list)) {
+  info <- contrast_list[[nm]]
+  message("Processing ", nm)
+  res <- get_contrast(dds_simple, genotype_alt = info$alt, treatment_level = info$trt)
+  res_df <- as.data.frame(res) %>%
+    tibble::rownames_to_column("gene_symbol") %>%
+    dplyr::rename(logfoldchange = log2FoldChange)
+  
+  degs <- res_df %>%
+    dplyr::filter(!is.na(padj), padj < padj_cutoff, abs(logfoldchange) > lfc_cutoff)
+  
+  out_file <- file.path("DEGs", paste0(nm, "_DEGs.csv"))
+  write.csv(degs, out_file, row.names = FALSE)
+}
+
+message("All DEG tables written to 'DEGs/' directory.")
