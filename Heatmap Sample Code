@@ -1,0 +1,81 @@
+# Load libraries
+library(DESeq2)
+library(tidyverse)
+library(pheatmap)
+
+# Step 1: Load raw counts
+raw_counts <- read.csv("RNASEQ61125.csv", check.names = FALSE)
+colnames(raw_counts)[1] <- "Gene"
+counts <- raw_counts %>%
+  filter(!duplicated(Gene)) %>%
+  column_to_rownames("Gene")
+
+# Step 2: Load sample metadata
+coldata <- read.csv("Sample_Metadata_Table.csv", row.names = 1)
+
+# Step 3: Align count matrix and metadata
+shared_samples <- intersect(colnames(counts), rownames(coldata))
+counts <- counts[, shared_samples]
+coldata <- coldata[shared_samples, ]
+
+stopifnot(all(colnames(counts) == rownames(coldata)))
+
+# Step 4: Create DESeq2 object
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = coldata,
+                              design = ~ genotype + treatment + genotype:treatment)
+dds <- DESeq(dds)
+
+# Remove MAH172 samples from heatmap plots only
+filtered_coldata <- coldata %>% filter(genotype != "MAH172")
+filtered_counts <- counts[, rownames(filtered_coldata)]
+
+# Normalize and transform
+vsd <- vst(dds, blind = TRUE)
+vsd_mat <- assay(vsd)[, colnames(filtered_counts)]
+
+# Group averages per batch
+vsd_avg <- vsd_mat %>%
+  as.data.frame() %>%
+  rownames_to_column("Gene") %>%
+  pivot_longer(-Gene, names_to = "Sample") %>%
+  left_join(coldata %>% rownames_to_column("Sample"), by = "Sample") %>%
+  filter(genotype != "MAH172") %>%
+  group_by(Gene, genotype, treatment) %>%
+  summarise(avg_expr = mean(value), .groups = "drop") %>%
+  unite(Group, genotype, treatment) %>%
+  pivot_wider(names_from = Group, values_from = avg_expr) %>%
+  column_to_rownames("Gene")
+
+# Function to plot top DE genes for a contrast
+plot_top_genes <- function(res, title) {
+  top_genes <- head(order(res$padj, na.last = NA), 20)
+  mat <- vsd_avg[rownames(res)[top_genes], ]
+  pheatmap(mat, cluster_rows = TRUE, cluster_cols = TRUE, 
+           scale = "row", main = title)
+}
+
+# Untreated: Genotype comparisons vs. N2
+res_rb2060_untr <- results(dds, contrast = c("genotype", "RB2060", "N2"), independentFiltering = TRUE)
+res_rb2598_untr <- results(dds, contrast = c("genotype", "RB2598", "N2"), independentFiltering = TRUE)
+
+plot_top_genes(res_rb2060_untr, "RB2060 vs N2 (Untreated)")
+plot_top_genes(res_rb2598_untr, "RB2598 vs N2 (Untreated)")
+
+# Treated: Genotype comparisons vs. N2
+res_rb2060_trt <- results(dds, list(c("genotype_RB2060_vs_N2", "genotypeRB2060.treatmenttreated")), independentFiltering = TRUE)
+res_rb2598_trt <- results(dds, list(c("genotype_RB2598_vs_N2", "genotypeRB2598.treatmenttreated")), independentFiltering = TRUE)
+
+plot_top_genes(res_rb2060_trt, "RB2060 vs N2 (Treated)")
+plot_top_genes(res_rb2598_trt, "RB2598 vs N2 (Treated)")
+
+# Treatment vs. No treatment (across genotypes)
+res_treatment <- results(dds, contrast = c("treatment", "treated", "untreated"), independentFiltering = TRUE)
+plot_top_genes(res_treatment, "Treated vs Untreated (All Genotypes)")
+
+# Interaction terms
+res_int_rb2060 <- results(dds, name = "genotypeRB2060.treatmenttreated", independentFiltering = TRUE)
+res_int_rb2598 <- results(dds, name = "genotypeRB2598.treatmenttreated", independentFiltering = TRUE)
+
+plot_top_genes(res_int_rb2060, "Interaction: RB2060 vs N2")
+plot_top_genes(res_int_rb2598, "Interaction: RB2598 vs N2")
