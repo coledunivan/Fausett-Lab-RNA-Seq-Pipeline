@@ -1,0 +1,58 @@
+#!/bin/bash
+
+
+#SBATCH --job-name=c.elegansrnaseq_job
+#SBATCH --output=output_%j.log
+#SBATCH --error=error_%j.log
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=16G
+#SBATCH --time=03:00:00
+#SBATCH --partition=general
+#SBATCH --mail-type=END, FAIL
+#SBATCH --mail-user=cd3393@uncw.edu
+
+spack load hisat2
+
+
+#Quality control was already done through novogene, so hisat2 can be ran
+#Run hisat2 
+#Repeat for each file (A1, A2, etc.)
+#first thing is always try with one sample/file/whatever
+#for test, put threads at 4
+
+
+hisat2 -q -p 38 \
+--summary-file summary_file.aligned \
+-x /path_to_genome_index \
+-1 /forward_read.fq.gz \
+-2 /reverse_read.fq.gz \
+-S /sample_output.sam
+
+#example from pipeline
+
+hisat2 -q -p 30 \
+--summary-file summary_file.aligned \
+-x /storage/cms/warnerj_lab/cd3393/genomes/celegansfinal_index \
+-1 /storage/cms/warnerj_lab/cd3393/cocl2_rnaseq/01.RawData/A1/A1_1.fq.gz \
+-2 /storage/cms/warnerj_lab/cd3393/cocl2_rnaseq/01.RawData/A1/A1_2.fq.gz \
+-S /storage/cms/warnerj_lab/cd3393/cocl2_rnaseq/A1_output.sam
+
+#Run feature counts on samples
+#Merges aligned data into one file
+
+
+featureCounts -p -O -T 38 -t exon -g gene_id \
+-a /path_to_genome_gtf \
+-o /path_to_working_dir/output_matrix.txt \
+
+
+#example from pipeline
+
+subread featureCounts -T 30 -p -O -t exon -g gene_id \
+-a /storage/cms/warnerj_lab/cd3393/genomes/celegans/GCF_000002985.6_WBcel235_genomic.gtf \
+-o /storage/cms/warnerj_lab/cd3393/data/RNASEQ61125.txt \
+/storage/cms/warnerj_lab/cd3393/cocl2_rnaseq/*.sam
+
+
+
