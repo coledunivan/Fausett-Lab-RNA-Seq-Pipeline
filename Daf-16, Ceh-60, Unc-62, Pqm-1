@@ -1,0 +1,129 @@
+library(DESeq2)
+library(dplyr)
+library(tibble)
+
+counts_file   <- "RNAseq_to_TF_Targets.csv"
+metadata_file <- "Sample_Metadata_Table copy.csv"
+
+counts_raw <- read.csv(counts_file, check.names = FALSE, stringsAsFactors = FALSE)
+
+# Remove empty first column if present
+if (colnames(counts_raw)[1] == "" || grepl("^Unnamed", colnames(counts_raw)[1])) {
+  counts_raw <- counts_raw[ , -1]
+}
+
+# Standardize gene column
+if (!"gene_symbol" %in% colnames(counts_raw)) {
+  if ("Gene" %in% colnames(counts_raw)) {
+    counts_raw <- dplyr::rename(counts_raw, gene_symbol = Gene)
+  } else stop("Cannot find gene_symbol or Gene column.")
+}
+
+sample_cols <- grep("^A\\d+", colnames(counts_raw), value = TRUE)
+stopifnot(length(sample_cols) > 0)
+
+# ---- Create count matrix (one row per gene) ----
+# Use the first occurrence of each gene for counts only
+counts_unique <- counts_raw %>%
+  group_by(gene_symbol) %>%
+  slice(1) %>%
+  ungroup()
+
+count_matrix <- counts_unique %>%
+  select(gene_symbol, all_of(sample_cols)) %>%
+  column_to_rownames("gene_symbol")
+
+# ---- Full TF-target mapping table (keep ALL rows) ----
+mapping_df <- counts_raw %>%
+  select(gene_symbol,
+         UniprotID.Target,
+         UniprotID.TF,
+         Name.TF,
+         Name.Target)  # keep names for clarity
+
+# ---- Metadata ----
+coldata <- read.csv(metadata_file, row.names = 1, check.names = FALSE, stringsAsFactors = FALSE)
+shared <- intersect(colnames(count_matrix), rownames(coldata))
+if (length(shared) == 0) stop("No overlapping samples.")
+count_matrix <- count_matrix[, shared]
+coldata <- coldata[shared, ]
+
+coldata$genotype  <- factor(coldata$genotype)
+coldata$treatment <- factor(coldata$treatment)
+if (!"experiment" %in% coldata) coldata$experiment <- factor("exp1") else coldata$experiment <- factor(coldata$experiment)
+
+# ---- DESeq2 objects ----
+dds <- DESeqDataSetFromMatrix(
+  countData = round(count_matrix),
+  colData   = coldata,
+  design    = ~ genotype * treatment + genotype:experiment + treatment:experiment
+)
+dds <- DESeq(dds)
+
+dds_simple <- dds
+dds_simple$genotype  <- relevel(dds_simple$genotype, ref = "N2")
+dds_simple$treatment <- relevel(dds_simple$treatment, ref = "untreated")
+design(dds_simple) <- ~ genotype + treatment + genotype:treatment
+dds_simple <- DESeq(dds_simple)
+
+resNames <- resultsNames(dds_simple); print(resNames)
+
+get_contrast <- function(dds_obj, genotype_alt, treatment_level) {
+  rn <- resultsNames(dds_obj)
+  main_coef <- rn[grepl(genotype_alt, rn) &
+                    grepl("^genotype", rn) &
+                    !grepl("\\.", rn) &
+                    !grepl("treatment", rn)]
+  if (length(main_coef) != 1)
+    stop("Could not uniquely identify main coefficient for ", genotype_alt)
+  
+  inter_pattern     <- paste0("genotype", genotype_alt, ".treatmenttreated")
+  inter_pattern_alt <- paste0("genotype", genotype_alt, "_treatmenttreated")
+  inter_coef <- rn[rn %in% c(inter_pattern, inter_pattern_alt)]
+  
+  if (treatment_level == "untreated") {
+    results(dds_obj, name = main_coef)
+  } else if (treatment_level == "treated") {
+    if (length(inter_coef) != 1)
+      stop("Could not find interaction coefficient for ", genotype_alt)
+    results(dds_obj, list(c(main_coef, inter_coef)))
+  } else stop("Unknown treatment level.")
+}
+
+contrast_list <- list(
+  "RB2060_vs_N2_untreated" = list(alt="RB2060", trt="untreated"),
+  "RB2060_vs_N2_treated"   = list(alt="RB2060", trt="treated"),
+  "RB2598_vs_N2_untreated" = list(alt="RB2598", trt="untreated"),
+  "RB2598_vs_N2_treated"   = list(alt="RB2598", trt="treated")
+)
+
+# Use TF names as they appear in Name.TF column
+tfs_of_interest <- c("daf-16","ceh-60","unc-62","pqm-1")
+
+dir.create("TF_Target_DEGs", showWarnings = FALSE)
+
+for (contrast_name in names(contrast_list)) {
+  info <- contrast_list[[contrast_name]]
+  message("Running contrast: ", contrast_name)
+  res <- get_contrast(dds_simple, genotype_alt = info$alt, treatment_level = info$trt)
+  
+  res_df <- as.data.frame(res) %>%
+    rownames_to_column("gene_symbol")
+  
+  # Join DE results to *all* TF-target edges (many-to-many)
+  merged <- mapping_df %>%
+    inner_join(res_df, by = "gene_symbol")
+  
+  for (tf in tfs_of_interest) {
+    all_tf_targets <- merged %>% filter(Name.TF == tf)
+    sig_tf_targets <- all_tf_targets %>%
+      filter(!is.na(padj), padj < 0.05) %>%
+      arrange(padj)
+    
+    prefix <- file.path("TF_Target_DEGs", paste0(tf, "_targets_", contrast_name))
+    write.csv(all_tf_targets, paste0(prefix, "_ALL.csv"), row.names = FALSE)
+    write.csv(sig_tf_targets, paste0(prefix, "_SIG.csv"), row.names = FALSE)
+  }
+}
+
+cat("Finished. Outputs in TF_Target_DEGs/.\n")
