@@ -1,0 +1,152 @@
+#Model fitting and PCA Plot Generation
+
+
+# Load libraries
+library(DESeq2)
+library(pheatmap)
+
+# Load count matrix and metadata
+counts <- read.csv("RNASEQ61125.csv", row.names = 1)
+coldata <- read.csv("Sample_Metadata_Table.csv", row.names = 1)
+
+# Create DESeqDataSet with full interaction model
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = coldata,
+                              design = ~ genotype + treatment + experiment +
+                                genotype:treatment +
+                                genotype:experiment +
+                                treatment:experiment)
+
+# Estimate size factors and dispersions before LRT
+dds <- estimateSizeFactors(dds)
+dds <- estimateDispersions(dds)
+
+# Define reduced models (dropping one interaction at a time)
+reduced_models <- list(
+  "no_genotype_treatment" = ~ genotype + treatment + experiment +
+    genotype:experiment + treatment:experiment,
+  
+  "no_genotype_experiment" = ~ genotype + treatment + experiment +
+    genotype:treatment + treatment:experiment,
+  
+  "no_treatment_experiment" = ~ genotype + treatment + experiment +
+    genotype:treatment + genotype:experiment
+)
+
+# Run LRTs, remove non-converged genes, apply padj < 0.05, export
+lrt_results_filtered <- list()
+
+for (name in names(reduced_models)) {
+  message("Running LRT for: ", name)
+  
+  # Run likelihood ratio test with increased iterations
+  dds_lrt <- nbinomLRT(dds, reduced = reduced_models[[name]], maxit = 50)
+  res_lrt <- results(dds_lrt)
+  
+  # Log non-converging genes
+  nonconv_idx <- which(!is.na(mcols(dds_lrt)$fullBetaConv) & mcols(dds_lrt)$fullBetaConv == FALSE)
+  nonconverged_genes <- rownames(dds_lrt)[nonconv_idx]
+  res_nonconv <- res_lrt[nonconverged_genes, ]
+  write.csv(as.data.frame(res_nonconv), file = paste0("LRT_nonconverged_", name, ".csv"))
+  
+  # Keep only converged genes
+  converged_idx <- which(!is.na(mcols(dds_lrt)$fullBetaConv) & mcols(dds_lrt)$fullBetaConv == TRUE)
+  res_lrt_clean <- res_lrt[converged_idx, ]
+  
+  # Keep padj < 0.05 only (ignore NA) - ensure validity
+  res_sig <- res_lrt_clean[!is.na(res_lrt_clean$padj) & res_lrt_clean$padj < 0.05, ]
+  
+  # Store and export filtered results
+  lrt_results_filtered[[name]] <- res_sig
+  write.csv(as.data.frame(res_sig), file = paste0("LRT_significant_", name, "_filtered.csv"))
+  
+  # Output result summary
+  summary(res_sig, alpha = 0.05)
+  print(summary(res_sig))
+  
+  res_filtered <- read.csv("LRT_significant_no_genotype_treatment_filtered.csv", row.names = 1)
+  View(res_filtered)
+  
+  
+  names(lrt_results_filtered)
+  View(lrt_results_filtered[["no_genotype_treatment"]])
+  
+  
+ #Proves significance of model 
+  res_gt <- lrt_results_filtered[["no_genotype_treatment"]]
+  summary(res_gt, alpha = 0.05)
+  all(!is.na(res_gt$padj) & res_gt$padj < 0.05)
+  res_ge <- lrt_results_filtered[["no_genotype_experiment"]]
+  summary(res_ge, alpha = 0.05)
+  all(!is.na(res_ge$padj) & res_ge$padj < 0.05)
+  
+  res_te <- lrt_results_filtered[["no_treatment_experiment"]]
+  summary(res_te, alpha = 0.05)
+  all(!is.na(res_te$padj) & res_te$padj < 0.05)
+  
+  #DE Analysis!!
+  
+  #Shows pca of genotype, treatment, experiment
+  
+  #Uses design formula in dds
+  vsd <- vst(dds, blind = FALSE)
+  plotPCA(vsd, intgroup = c("genotype", "treatment", "experiment"))
+
+  #Verify PCA plot
+  library(DESeq2)
+  #Variance is modeled here
+  vsd <- vst(dds, blind = FALSE)
+  pcaData <- plotPCA(vsd, intgroup = c("genotype", "treatment", "experiment"), returnData = TRUE)
+  
+  # Perform a basic ANOVA to see which factor explains PC1/PC2
+  summary(aov(PC1 ~ genotype + treatment + experiment, data = pcaData))
+  summary(aov(PC2 ~ genotype + treatment + experiment, data = pcaData))
+  
+  #PCA shows treatment is the dominant biological effect - not batch or genotype
+  #PC1 shows Treatment as dominant driver in global expression
+  #Genotype is important, but secondary driver
+  
+  
+  
+  #Full model plot
+  colData(vsd)$full_group <- with(colData(vsd), paste(genotype, treatment, experiment, sep = ":"))
+  plotPCA(vsd, intgroup = "full_group")
+  #shows pca from the exact condition of full model
+  
+  #Verifying variance in full model
+  
+  #Create VST object
+  vsd <- vst(dds, blind = FALSE)
+  
+  #Extract PCA data
+  pcaData <- plotPCA(vsd, intgroup = c("genotype", "treatment", "experiment"), returnData = TRUE)
+  
+  #Add interaction terms to the PCA metadata
+  pcaData$GT <- pcaData$genotype
+  pcaData$TR <- pcaData$treatment
+  pcaData$EX <- pcaData$experiment
+  
+  # Create interaction terms explicitly
+  pcaData$GT_TR <- interaction(pcaData$GT, pcaData$TR)
+  pcaData$GT_EX <- interaction(pcaData$GT, pcaData$EX)
+  pcaData$TR_EX <- interaction(pcaData$TR, pcaData$EX)
+  
+  #Run anova on PC1 and PC2
+  # For PC1
+  summary(aov(PC1 ~ GT + TR + EX + GT_TR + GT_EX + TR_EX, data = pcaData))
+  
+  # For PC2
+  summary(aov(PC2 ~ GT + TR + EX + GT_TR + GT_EX + TR_EX, data = pcaData))
+  
+  #EX Experiment is primary driver of PC2
+  
+  #IN PC1, TR is primary driver of PC1, GT is significant in PC1, 
+  #Batch is present but modest, GT:TR (genotype:treatment) had a significant interaction
+  #GT:EX not significant - genotype doesn't vary by experiment
+  #TR:EX some treatment experiment interaction - not significant
+  #Which genes show a genotype-specific response to treatment
+  
+  
+
+
+  
