@@ -1,0 +1,252 @@
+# Load libraries
+library(DESeq2)
+library(tidyverse)
+library(readr)
+
+# Step 1: Load merged TF counts
+counts_raw <- read.csv("Merged_TF_Counts copy.csv", check.names = FALSE)
+
+# Step 2: Extract count matrix
+count_cols <- grep("^A\\d+", colnames(counts_raw), value = TRUE)
+counts <- counts_raw %>%
+  select(gene_symbol, UniprotID.Target, all_of(count_cols)) %>%
+  filter(!duplicated(gene_symbol)) %>%
+  column_to_rownames("gene_symbol")
+
+# Step 3: Load metadata
+coldata <- read.csv("Sample_Metadata_Table copy.csv", row.names = 1)
+coldata$genotype <- factor(coldata$genotype, levels = c("N2", "RB2060", "RB2598"))
+coldata$treatment <- factor(coldata$treatment, levels = c("untreated", "treated"))
+coldata <- coldata %>% filter(!is.na(genotype), !is.na(treatment), !is.na(experiment))
+
+# Align count matrix with metadata
+shared_samples <- intersect(colnames(counts), rownames(coldata))
+counts <- counts[, shared_samples]
+coldata <- coldata[shared_samples, ]
+
+# Step 4: DESeq2 with original model
+dds <- DESeqDataSetFromMatrix(
+  countData = counts,
+  colData = coldata,
+  design = ~ genotype * treatment + genotype:experiment + treatment:experiment
+)
+dds <- dds[rowSums(counts(dds)) > 10, ]
+dds <- DESeq(dds)
+
+# Step 5: Load TF-target map
+tf_map <- counts_raw %>%
+  select(UniprotID.TF, Name.TF, UniprotID.Target, Name.Target) %>%
+  filter(!is.na(UniprotID.TF) & !is.na(UniprotID.Target)) %>%
+  distinct()
+
+# Step 6: Define contrasts of interest
+contrast_list <- c(
+  "genotype_RB2060_vs_N2",
+  "genotype_RB2598_vs_N2",
+  "genotypeRB2060.treatmenttreated",
+  "genotypeRB2598.treatmenttreated",
+  "treatment_treated_vs_untreated",
+  "genotypeN2.treatmenttreated"
+)
+
+# Step 7: DEG + TF-target enrichment extraction
+tf_enrichment_list <- list()
+
+for (contrast in contrast_list) {
+  message("Processing contrast: ", contrast)
+  if (!(contrast %in% resultsNames(dds))) {
+    warning("Contrast not found: ", contrast)
+    next
+  }
+  
+  # Get DEGs
+  res <- lfcShrink(dds, coef = contrast, type = "apeglm")
+  res_df <- as.data.frame(res) %>%
+    rownames_to_column("gene_symbol") %>%
+    left_join(counts_raw %>% select(gene_symbol, UniprotID.Target) %>% distinct(), by = "gene_symbol") %>%
+    filter(!is.na(padj))
+  
+  sig_targets <- res_df %>% filter(padj < 0.05) %>% pull(UniprotID.Target)
+  
+  # For each TF, list DEG targets
+  tf_summary <- tf_map %>%
+    filter(UniprotID.Target %in% res_df$UniprotID.Target) %>%
+    group_by(UniprotID.TF, Name.TF) %>%
+    summarize(
+      total_targets = n(),
+      deg_targets = sum(UniprotID.Target %in% sig_targets),
+      deg_target_ids = paste(unique(UniprotID.Target[UniprotID.Target %in% sig_targets]), collapse = ";"),
+      .groups = "drop"
+    ) %>%
+    mutate(contrast = contrast)
+  
+  tf_enrichment_list[[contrast]] <- tf_summary
+  
+  write.csv(tf_summary,
+            paste0("TF_DEG_Targets_", gsub("[:\\.]+", "_", contrast), ".csv"),
+            row.names = FALSE)
+}
+
+# Step 8: Save combined summary (optional)
+final_tf_summary <- bind_rows(tf_enrichment_list)
+write.csv(final_tf_summary, "All_TF_DEG_Targets_Summary.csv", row.names = FALSE)
+
+
+#Plot for target proportion
+# Filter for top 20 TFs by DEG target proportion
+plot_df <- tf_enrichment_list[["genotype_RB2060_vs_N2"]] %>%
+  mutate(prop_deg = deg_targets / total_targets) %>%
+  filter(deg_targets >= 3) %>%                  # Optional threshold
+  arrange(desc(prop_deg)) %>%
+  slice_head(n = 20)                            # Top 20 TFs
+
+# Plot
+# Save plot as PDF
+pdf("Top20_TFs_DEG_Proportion_RB2060_vs_N2.pdf", width = 8, height = 6)
+
+ggplot(plot_df, aes(x = prop_deg, y = reorder(Name.TF, prop_deg))) +
+  geom_point(aes(size = total_targets, color = deg_targets), alpha = 0.9) +
+  scale_color_gradient(low = "lightblue", high = "darkblue") +
+  scale_size(range = c(3, 10)) +
+  labs(
+    title = "Top 20 TFs by DEG Target Proportion (RB2060 vs N2)",
+    x = "Proportion of DEG Targets",
+    y = "Transcription Factor",
+    color = "# DEG Targets",
+    size = "Total Targets"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+dev.off()
+
+#Plots of RB2060 vs. N2 untreated and treated
+# ----- Setup -----
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+
+# Contrast 1: RB2060 vs N2 (untreated)
+contrast_name <- "genotype_RB2060_vs_N2"
+plot_df <- tf_enrichment_list[[contrast_name]] %>%
+  mutate(prop_deg = deg_targets / total_targets) %>%
+  filter(deg_targets >= 3) %>%
+  arrange(desc(prop_deg)) %>%
+  slice_head(n = 20)
+
+pdf(paste0("Top20_TFs_", contrast_name, ".pdf"), width = 8, height = 6)
+
+ggplot(plot_df, aes(x = prop_deg, y = reorder(Name.TF, prop_deg))) +
+  geom_point(aes(size = total_targets, color = deg_targets), alpha = 0.9) +
+  scale_color_gradient(low = "lightblue", high = "darkblue") +
+  scale_size(range = c(3, 10)) +
+  labs(
+    title = "Top 20 TFs by DEG Target Proportion (RB2060 vs N2 – Untreated)",
+    x = "Proportion of Differentially Expressed Target Genes",
+    y = "Transcription Factor",
+    color = "# DEG Targets",
+    size = "Total TF Targets"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+dev.off()
+
+# ---- Contrast 2: RB2060 vs N2 under treated ----
+contrast_name <- "genotypeRB2060.treatmenttreated"
+plot_df <- tf_enrichment_list[[contrast_name]] %>%
+  mutate(prop_deg = deg_targets / total_targets) %>%
+  filter(deg_targets >= 3) %>%
+  arrange(desc(prop_deg)) %>%
+  slice_head(n = 20)
+
+pdf(paste0("Top20_TFs_", contrast_name, ".pdf"), width = 8, height = 6)
+
+ggplot(plot_df, aes(x = prop_deg, y = reorder(Name.TF, prop_deg))) +
+  geom_point(aes(size = total_targets, color = deg_targets), alpha = 0.9) +
+  scale_color_gradient(low = "lightblue", high = "darkblue") +
+  scale_size(range = c(3, 10)) +
+  labs(
+    title = "Top 20 TFs by DEG Target Proportion (RB2060 vs N2 – Treated)",
+    x = "Proportion of Differentially Expressed Target Genes",
+    y = "Transcription Factor",
+    color = "# DEG Targets",
+    size = "Total TF Targets"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+dev.off()
+
+# Load required library
+library(pheatmap)
+
+# Get normalized counts
+norm_counts <- counts(dds, normalized = TRUE) %>%
+  as.data.frame() %>%
+  rownames_to_column("gene_symbol")
+
+# Set the contrast for which you want to generate heatmaps
+contrast_name <- "genotype_RB2060_vs_N2"
+
+# Get top TFs
+top_tfs <- tf_enrichment_list[[contrast_name]] %>%
+  mutate(prop_deg = deg_targets / total_targets) %>%
+  filter(deg_targets >= 3) %>%
+  arrange(desc(prop_deg)) %>%
+  slice_head(n = 5) %>%
+  pull(UniprotID.TF)
+
+# For each TF, generate heatmap of DEG targets
+for (tf in top_tfs) {
+  message("Generating heatmap for TF: ", tf)
+  
+  # Get target genes for this TF that are DEGs
+  tf_targets <- tf_map %>%
+    filter(UniprotID.TF == tf) %>%
+    semi_join(
+      res_df <- lfcShrink(dds, coef = contrast_name, type = "apeglm") %>%
+        as.data.frame() %>%
+        rownames_to_column("gene_symbol") %>%
+        filter(padj < 0.05),
+      by = c("UniprotID.Target" = "gene_symbol")
+    ) %>%
+    pull(UniprotID.Target) %>%
+    unique()
+  
+  # Get normalized expression matrix for these genes
+  heatmap_data <- norm_counts %>%
+    filter(gene_symbol %in% tf_targets) %>%
+    column_to_rownames("gene_symbol")
+  
+  # Subset samples to only include shared ones
+  heatmap_data <- heatmap_data[, shared_samples]
+  
+  # Create annotation for columns
+  annotation_col <- coldata %>%
+    select(genotype, treatment) %>%
+    rownames_to_column("sample") %>%
+    filter(sample %in% colnames(heatmap_data)) %>%
+    column_to_rownames("sample")
+  
+  # Save heatmap as PDF
+  pdf(paste0("Heatmap_", tf, "_targets_", contrast_name, ".pdf"), width = 10, height = 8)
+  pheatmap(
+    mat = scale(t(heatmap_data)),  # scale across genes
+    cluster_rows = TRUE,
+    cluster_cols = TRUE,
+    annotation_col = annotation_col,
+    fontsize_row = 6,
+    main = paste("TF Target Heatmap:", tf, "\nContrast:", contrast_name)
+  )
+  dev.off()
+}
