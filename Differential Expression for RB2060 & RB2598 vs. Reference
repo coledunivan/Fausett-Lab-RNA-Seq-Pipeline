@@ -102,7 +102,7 @@ contrast_list <- list(
 
 # ---- Filtering parameters ----
 padj_cutoff <- 0.05
-lfc_cutoff  <- 1  # log2 fold-change threshold
+lfc_cutoff  <- 1  # log fold-change threshold
 
 # ---- Run contrasts and save DEG tables ----
 if (!dir.exists("DEGs")) dir.create("DEGs")
